@@ -28,7 +28,7 @@ This system lets users query a clinic database using plain English. It uses:
 - **Groq** (via OpenAI-compatible API) as the LLM backend — model: `openai/gpt-oss-120b`
 - **SQLite** (`clinic.db`) as the database
 - **FastAPI** to expose a streaming chat REST API
-- **Custom SQL validation** to block dangerous queries (only `SELECT` and `PRAGMA` allowed)
+- **Custom SQL validation** to block dangerous queries (only `SELECT` statements allowed)
 - **Schema-aware system prompt** — the full database schema is injected into every LLM request so the agent never wastes iterations on introspection
 - **In-memory agent memory** with seeded training examples for common questions
 - **LRU caching middleware** (1-hour TTL) on LLM requests
@@ -71,7 +71,7 @@ Streaming JSON response (SSE chunks)
 |---|---|
 | Schema baked into system prompt | Eliminates PRAGMA introspection calls, saving tool iterations |
 | `max_tool_iterations=25` | Gives agent room for memory search + multi-attempt SQL + save |
-| PRAGMA whitelisted in validator | Agent used to fail on schema lookups — now unnecessary but safe to keep |
+| PRAGMA blocked in validator | Schema is baked into the system prompt — agent has no need for PRAGMA introspection calls |
 | 60-second delay in test script | Respects Groq API rate limits during bulk evaluation |
 
 ---
@@ -376,7 +376,7 @@ The system only allows read-only queries. The following are **blocked**:
 - `xp_*` and `sp_*` prefixes
 - Access to `sqlite_master` system table
 
-`PRAGMA` statements (read-only SQLite metadata) are allowed.
+`PRAGMA` statements are **blocked** — the full schema is embedded in the system prompt, so the agent has no need for runtime introspection.
 
 ---
 
@@ -407,7 +407,7 @@ nl-to-sql-system/
 ├── config.py                # Model config, DB name, table record counts
 ├── setup_database.py        # Creates clinic.db and seeds mock data
 ├── seed_memory.py           # Loads training examples into agent memory
-├── sql_validation_check.py  # SQL safety validator (SELECT/PRAGMA only)
+├── sql_validation_check.py  # SQL safety validator (SELECT only)
 ├── caching_middleware.py    # LRU cache for LLM responses (1h TTL)
 ├── validation_middleware.py # Pydantic input validation for prompts
 ├── logger_setup.py          # Structured logging with structlog

@@ -13,12 +13,6 @@ def validate_sql(sql_query: str) -> tuple[bool, str]:
     sql_upper = sql_query.upper()
     sql_stripped = sql_upper.strip()
 
-    # 0. Allow PRAGMA statements - these are read-only SQLite metadata queries
-    #    used by the agent for schema introspection (e.g. PRAGMA table_info(...))
-    if sql_stripped.startswith("PRAGMA"):
-        logger.info("SQL validation passed (PRAGMA - read-only metadata)", query=sql_upper)
-        return True, "Query is valid."
-
     # 1. Must be SELECT only
     if not sql_stripped.startswith("SELECT"):
         logger.warning("SQL validation failed: Non-SELECT operation", query=sql_upper)
