@@ -1,0 +1,9 @@
+vanna[sqlite, openai]>=2.0.0 # base install
+fastapi
+uvicorn[standard]
+plotly
+pandas
+python-dotenv
+faker
+structlog
+pydantic

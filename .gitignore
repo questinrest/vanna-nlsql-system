@@ -1,0 +1,27 @@
+# Environment & secrets
+.env
+
+# Generated database (download link in README)
+clinic.db
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+.venv/
+venv/
+env/
+
+# Test output (raw JSON — large)
+test_run_results.json
+
+# ChromaDB persistent store if used
+f8c88490871f6169/
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db
