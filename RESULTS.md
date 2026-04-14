@@ -1,113 +1,45 @@
-# NL2SQL Evaluation Results
+# NL2SQL Evaluation Report
 
-**Run completed:** 2026-04-14 23:46:56
-**Passed:** 19 out of 20
-
----
-
-## How "Correct" and "Not Correct" Are Decided
-
-The evaluation logic lives in `test_script.py` (`_classify_issue` + `evaluate_question`).
-A question is marked **Correct ✓** only when **all three conditions below are true simultaneously**:
-
-| Condition | What is checked |
-|---|---|
-| 1. API returned HTTP 200 | The request did not fail at the network/server level |
-| 2. At least one SQL statement was executed | The agent actually ran a query (not just answered from memory or errored out before reaching the database) |
-| 3. No issue string was set | None of the failure classifiers below fired |
-
-A non-empty `issue` string is set — and the question is marked **Not Correct ✗** — in any of these cases:
-
-| Issue trigger | What it means |
-|---|---|
-| HTTP status ≠ 200 | The API itself returned an error response |
-| Final answer contains `"unexpected error"` | The LLM request failed before SQL was even generated |
-| Zero SQL entries captured | The agent produced a final answer without ever calling `run_sql` |
-| Every SQL attempt returned an Error frame | All queries were rejected or raised a database exception |
-| At least one SQL attempt returned an Error frame (but not all) | The agent recovered and returned a final answer, but only after one or more failed SQL attempts |
-
-In code:
-```python
-result["correct"] = bool(sql_entries) and not result["issue"]
-```
+**Agent run completed:** 2026-04-14 23:46:56
+**Live SQL verified:** 2026-04-14 19:06:31 UTC
+**Database:** `clinic.db`
 
 ---
 
-## False Positive / False Negative Analysis
+## Summary
 
-This is a **heuristic evaluator** — it checks execution success, not answer correctness.
-That introduces specific blind spots:
+| Metric | Value |
+|--------|-------|
+| Total questions | 20 |
+| Agent marked Correct | 19 |
+| Live SQL: MATCH | 19 |
+| Live SQL: PARTIAL / ERROR | 1 |
+| Live SQL: MISMATCH | 0 |
 
-### Potential False Positives (marked Correct ✓ but actually wrong)
+### Question Overview
 
-| Scenario | Why it can happen | Example risk |
-|---|---|---|
-| Wrong SQL, right-looking answer | The agent writes incorrect SQL (wrong JOIN, wrong filter) but returns a plausible result. No SQL content check is done. | A GROUP BY on the wrong column could return a number that still looks reasonable |
-| All-rows query instead of filtered query | `SELECT * FROM invoices` passes because rows were returned and no error fired, even if the question asked for overdue invoices only | Q13 "Show unpaid invoices" — if the agent had dropped the WHERE clause, it would still pass |
-| Semantically wrong interpretation | The agent answers a slightly different question than asked (e.g. "revenue by treatment cost" instead of "revenue by invoice amount") — the script cannot detect this | Q6 "Show revenue by doctor" used `treatments.cost` not `invoices.total_amount`; the script passed it because SQL ran without errors |
-| Partial date range | For "last month" or "last quarter" queries, if the agent uses a slightly off date boundary, results are returned and the question passes | Q7 used hardcoded `2026-01-01` to `2026-04-01` — correct for April 2026 but would drift in other months |
-
-### Potential False Negatives (marked Not Correct ✗ but actually fine)
-
-| Scenario | Why it can happen | Example risk |
-|---|---|---|
-| Correct final answer after a failed first attempt | The agent retried and got the right answer, but because **any** failed SQL attempt exists, the issue string is set and the question is marked incorrect | **Q17 is exactly this case** — the agent answered correctly but attempt 2 had a SQL syntax error, so the script marked it wrong |
-| "No data found" treated as an error frame | If the database legitimately has no matching rows, `SafeSqliteRunner` returns `{"Message": ["No data found"]}`. This is not detected as an error by the script — but if the agent then gives up without running further SQL, `sql_entries` would be populated with a non-error entry and the question could pass even though the answer is empty |
-
-### The Q17 case (the one failure)
-
-**Question:** "Average appointment duration by doctor"
-
-The agent produced the correct final answer (a table of 15 doctors with their average durations). However, one intermediate SQL attempt used a misuse of aggregate `SUM()` inside another aggregate, which raised a database error:
-
-```
-Attempt 2 – Error: Database execution failed: misuse of aggregate function SUM()
-```
-
-Because `has_error=True` for one entry (but not all), the classifier set the issue to:
-> "Agent reached a final answer after one or more failed SQL attempts."
-
-And therefore `correct = False` — even though the answer delivered to the user was accurate.
-
-**This is a false negative.** The agent was correct. The evaluator penalised it for the retry path.
-
-### Summary of evaluator reliability
-
-| | Count | Notes |
-|---|---|---|
-| Confirmed true positives | 18 | Correct answer + clean SQL execution path |
-| Confirmed false negatives | 1 | Q17 — correct answer, penalised for failed intermediate attempt |
-| Likely false positives | 0 | No obvious cases found in this run |
-| Possible silent false positives | Up to ~3 | Q6 (revenue definition), date-range queries — would need manual SQL review to confirm |
-
-**Bottom line:** The 19/20 score is a lower bound on true correctness. The real score is at minimum 19/20 and likely 20/20 for this run, given Q17 was answered correctly.
-
----
-
-## Summary Table
-
-| Q# | Question | SQL Captured | Correct | Final Answer |
-| --- | --- | --- | --- | --- |
-| 1 | How many patients do we have? | `SELECT COUNT(*) AS total_patients FROM patients` | Yes | We have **200 patients** registered in the clinic. |
-| 2 | List all doctors and their specializations | `SELECT name, specialization FROM doctors;` | Yes | Here are the doctors currently recorded in the system together with their areas of specialization:  \| Doctor Name   ... |
-| 3 | Show me appointments for last month | `SELECT id, patient_id, doctor_id, appointment_date, status, notes FROM appoin...` | Yes | **Appointments – March 2026 (the month preceding today)**    \| Total appointments \| 39 \| \|-------------------\|--... |
-| 4 | Which doctor has the most appointments? | `SELECT d.name, COUNT(a.id) AS appointment_count FROM doctors d JOIN appointme...` | Yes | The doctor with the highest number of appointments is **Januja Kala**, who has **40 appointments**. |
-| 5 | What is the total revenue? | `SELECT ROUND(SUM(total_amount), 2) AS total_revenue FROM invoices` | Yes | The clinic’s total revenue recorded in the **invoices** table is ** 754,921.83 ** (rounded to two decimal places). |
-| 6 | Show revenue by doctor | `SELECT d.id AS doctor_id, d.name, d.specialization, SUM(t.cost) AS revenue FR...` | Yes | **Revenue by Doctor (based on summed treatment costs)**    \| Rank \| Doctor ID \| Doctor Name          \| Specializa... |
-| 7 | How many cancelled appointments last quarter? | `SELECT COUNT(*) AS cancelled_count FROM appointments WHERE status='Cancelled'...` | Yes | In the most recent quarter (January 1 – March 31 2026), the clinic recorded **43 appointments** with a status of **“C... |
-| 8 | Top 5 patients by spending | `SELECT p.id, p.first_name, p.last_name, p.email, SUM(i.total_amount) AS total...` | Yes | **Top 5 Patients by Total Spending (Invoice Amounts)**    \| Rank \| Patient ID \| First Name \| Last Name \| Email \... |
-| 9 | Average treatment cost by specialization | `SELECT d.specialization, AVG(t.cost) AS average_cost FROM treatments t JOIN a...` | Yes | **Average Treatment Cost by Doctor Specialization**  \| Specialization \| Avg. Treatment Cost \| \|----------------\|... |
-| 10 | Show monthly appointment count for the past 6 months | `SELECT strftime('%Y-%m', appointment_date) AS month, COUNT(*) AS appointment_...` | Yes | **Monthly Appointment Count – Last 6 Months**  \| Month (YYYY‑MM) \| Appointments \| \|-----------------\|-----------... |
-| 11 | Which city has the most patients? | `SELECT city, COUNT(*) AS patient_count             FROM patients             ...` | Yes | The city with the highest number of patients is **Kochi**, with **27 patients** recorded in the database. |
-| 12 | List patients who visited more than 3 times | `SELECT p.id, p.first_name, p.last_name, p.email, p.phone, COUNT(a.id) AS visi...` | Yes | Here are the patients who have had **more than three completed appointments** (i.e., they have visited the clinic at ... |
-| 13 | Show unpaid invoices | `SELECT id, patient_id, invoice_date, total_amount, paid_amount, status       ...` | Yes | **Unpaid invoices (paid < total OR status ≠ ‘Paid’)**  \| #  \| Invoice ID \| Patient ID \| Date       \| Total (¥) \... |
-| 14 | What percentage of appointments are no-shows? | `SELECT ROUND(100.0 * SUM(CASE WHEN status = 'No-show' THEN 1 ELSE 0 END) / CO...` | Yes | The query shows that **0 % of all appointments are recorded as “No‑show.”** This indicates that, so far, none of the ... |
-| 15 | Show the busiest day of the week for appointments | `SELECT CASE strftime('%w', appointment_date)     WHEN '0' THEN 'Sunday'     W...` | Yes | The analysis of the **appointments** table shows which weekday has the highest number of scheduled appointments.  **R... |
-| 16 | Revenue trend by month | `SELECT strftime('%Y-%m', invoice_date) AS month,        ROUND(SUM(total_amoun...` | Yes | **Monthly Revenue from Invoices (by invoice_date)**    \| Month (YYYY‑MM) \| Revenue (local currency) \| \|----------... |
-| 17 | Average appointment duration by doctor | `SELECT d.name AS doctor_name,        AVG(appointment_duration) AS avg_duratio...` | No | **Average Appointment Duration by Doctor (minutes)**    \| Doctor Name \| # Appointments \| Avg Duration (min) \| \|-... |
-| 18 | List patients with overdue invoices | `SELECT p.id AS patient_id, p.first_name, p.last_name, p.email, p.phone, i.id ...` | Yes | **Patients with overdue invoices**  \| Patient ID \| First Name \| Last Name \| Email \| Phone \| Invoice ID \| Invoi... |
-| 19 | Compare revenue between departments | `SELECT d.department, SUM(t.cost) AS revenue FROM treatments t JOIN appointmen...` | Yes | **Revenue by Department**  \| Department                \| Revenue (local currency) \| \|---------------------------\... |
-| 20 | Show patient registration trend by month | `SELECT strftime('%Y-%m', registered_date) AS month, COUNT(*) AS registrations...` | Yes | **Patient Registration Trend (by month)**    \| Month (YYYY‑MM) \| Registrations \| \|----------------\|-------------... |
+| Q# | Question | Expected Behaviour | Agent Correct | Live Verdict |
+|----|----------|--------------------|---------------|--------------|
+| 1 | How many patients do we have? | Returns count | Yes ✓ | ✓ MATCH |
+| 2 | List all doctors and their specializations | Returns doctor list | Yes ✓ | ✓ MATCH |
+| 3 | Show me appointments for last month | Filters by date | Yes ✓ | ✓ MATCH |
+| 4 | Which doctor has the most appointments? | Aggregation + ordering | Yes ✓ | ✓ MATCH |
+| 5 | What is the total revenue? | SUM of invoice amounts | Yes ✓ | ✓ MATCH |
+| 6 | Show revenue by doctor | JOIN + GROUP BY | Yes ✓ | ✓ MATCH |
+| 7 | How many cancelled appointments last quarter? | Status filter + date | Yes ✓ | ✓ MATCH |
+| 8 | Top 5 patients by spending | JOIN + ORDER + LIMIT | Yes ✓ | ✓ MATCH |
+| 9 | Average treatment cost by specialization | Multi-table JOIN + AVG | Yes ✓ | ✓ MATCH |
+| 10 | Show monthly appointment count for the past 6 months | Date grouping | Yes ✓ | ✓ MATCH |
+| 11 | Which city has the most patients? | GROUP BY + COUNT | Yes ✓ | ✓ MATCH |
+| 12 | List patients who visited more than 3 times | HAVING clause | Yes ✓ | ✓ MATCH |
+| 13 | Show unpaid invoices | Status filter | Yes ✓ | ✓ MATCH |
+| 14 | What percentage of appointments are no-shows? | Percentage calculation | Yes ✓ | ✓ MATCH |
+| 15 | Show the busiest day of the week for appointments | Date function | Yes ✓ | ✓ MATCH |
+| 16 | Revenue trend by month | Time series | Yes ✓ | ✓ MATCH |
+| 17 | Average appointment duration by doctor | AVG + GROUP BY | No ✗ | ⚠ PARTIAL / ERROR |
+| 18 | List patients with overdue invoices | JOIN + filter | Yes ✓ | ✓ MATCH |
+| 19 | Compare revenue between departments | JOIN + GROUP BY | Yes ✓ | ✓ MATCH |
+| 20 | Show patient registration trend by month | Date grouping | Yes ✓ | ✓ MATCH |
 
 ---
 
@@ -115,17 +47,21 @@ And therefore `correct = False` — even though the answer delivered to the user
 
 ### Q1: How many patients do we have?
 
-**Expected Behaviour:** Returns count
+**Expected behaviour:** Returns count
+**Agent verdict:** Yes ✓  |  **Live SQL verdict:** ✓ MATCH
 
-**Correct:** Yes ✓
+#### SQL
 
-**SQL Executed by Agent:**
 ```sql
 SELECT COUNT(*) AS total_patients FROM patients
 ```
 
-**Result – Row count:** 1
-**Result – Preview (up to 5 rows):**
+| | Live | Reported | Match |
+|---|---|---|---|
+| Row count | 1 | 1 | ✓ |
+| Preview (5 rows) | — | — | ✓ |
+
+**Live result (first 5 rows):**
 ```json
 [
   {
@@ -134,7 +70,16 @@ SELECT COUNT(*) AS total_patients FROM patients
 ]
 ```
 
-**Final Answer from Agent:**
+**Reported result (from original run):**
+```json
+[
+  {
+    "total_patients": 200
+  }
+]
+```
+
+#### Final Answer from Agent
 
 We have **200 patients** registered in the clinic.
 
@@ -142,17 +87,21 @@ We have **200 patients** registered in the clinic.
 
 ### Q2: List all doctors and their specializations
 
-**Expected Behaviour:** Returns doctor list
+**Expected behaviour:** Returns doctor list
+**Agent verdict:** Yes ✓  |  **Live SQL verdict:** ✓ MATCH
 
-**Correct:** Yes ✓
+#### SQL
 
-**SQL Executed by Agent:**
 ```sql
 SELECT name, specialization FROM doctors;
 ```
 
-**Result – Row count:** 15
-**Result – Preview (up to 5 rows):**
+| | Live | Reported | Match |
+|---|---|---|---|
+| Row count | 15 | 15 | ✓ |
+| Preview (5 rows) | — | — | ✓ |
+
+**Live result (first 5 rows):**
 ```json
 [
   {
@@ -178,7 +127,33 @@ SELECT name, specialization FROM doctors;
 ]
 ```
 
-**Final Answer from Agent:**
+**Reported result (from original run):**
+```json
+[
+  {
+    "name": "Aadhya Ravi",
+    "specialization": "Pediatrics"
+  },
+  {
+    "name": "Yochana Chawla",
+    "specialization": "Orthopedics"
+  },
+  {
+    "name": "Girindra Karan",
+    "specialization": "Dermatology"
+  },
+  {
+    "name": "Chakradhar Chakraborty",
+    "specialization": "Dermatology"
+  },
+  {
+    "name": "Naveen Ahuja",
+    "specialization": "Cardiology"
+  }
+]
+```
+
+#### Final Answer from Agent
 
 Here are the doctors currently recorded in the system together with their areas of specialization:
 
@@ -216,21 +191,21 @@ Let me know if you’d like any further breakdowns (e.g., doctors per department
 
 ### Q3: Show me appointments for last month
 
-**Expected Behaviour:** Filters by date
+**Expected behaviour:** Filters by date
+**Agent verdict:** Yes ✓  |  **Live SQL verdict:** ✓ MATCH
 
-**Correct:** Yes ✓
+#### Attempt 1
 
-**SQL Executed by Agent:**
 ```sql
 SELECT id, patient_id, doctor_id, appointment_date, status, notes FROM appointments WHERE strftime('%Y-%m', appointment_date) = strftime('%Y-%m', 'now', '-1 month') ORDER BY appointment_date;
-
-SELECT COUNT(*) AS total_appointments FROM appointments WHERE strftime('%Y-%m', appointment_date) = strftime('%Y-%m', 'now', '-1 month');
-
-SELECT status, COUNT(*) AS count FROM appointments WHERE strftime('%Y-%m', appointment_date) = strftime('%Y-%m','now','-1 month') GROUP BY status;
 ```
 
-**Attempt 1 – Row count:** 39
-**Attempt 1 – Preview (up to 5 rows):**
+| | Live | Reported | Match |
+|---|---|---|---|
+| Row count | 39 | 39 | ✓ |
+| Preview (5 rows) | — | — | ✓ |
+
+**Live result (first 5 rows):**
 ```json
 [
   {
@@ -276,8 +251,64 @@ SELECT status, COUNT(*) AS count FROM appointments WHERE strftime('%Y-%m', appoi
 ]
 ```
 
-**Attempt 2 – Row count:** 1
-**Attempt 2 – Preview (up to 5 rows):**
+**Reported result (from original run):**
+```json
+[
+  {
+    "id": 331,
+    "patient_id": 90,
+    "doctor_id": 15,
+    "appointment_date": "2026-03-01 10:45:00",
+    "status": "Completed",
+    "notes": "Doloribus adipisci dolore quos iste quasi ipsam voluptas est quia corrupti."
+  },
+  {
+    "id": 20,
+    "patient_id": 114,
+    "doctor_id": 14,
+    "appointment_date": "2026-03-01 11:15:00",
+    "status": "Completed",
+    "notes": "Ut facere tempora cumque impedit provident ullam."
+  },
+  {
+    "id": 200,
+    "patient_id": 20,
+    "doctor_id": 3,
+    "appointment_date": "2026-03-01 16:00:00",
+    "status": "Completed",
+    "notes": "Nemo quasi cupiditate inventore qui expedita."
+  },
+  {
+    "id": 49,
+    "patient_id": 54,
+    "doctor_id": 8,
+    "appointment_date": "2026-03-01 17:30:00",
+    "status": "Cancelled",
+    "notes": null
+  },
+  {
+    "id": 202,
+    "patient_id": 53,
+    "doctor_id": 14,
+    "appointment_date": "2026-03-02 17:15:00",
+    "status": "Completed",
+    "notes": "Officiis id dolorem sapiente."
+  }
+]
+```
+
+#### Attempt 2
+
+```sql
+SELECT COUNT(*) AS total_appointments FROM appointments WHERE strftime('%Y-%m', appointment_date) = strftime('%Y-%m', 'now', '-1 month');
+```
+
+| | Live | Reported | Match |
+|---|---|---|---|
+| Row count | 1 | 1 | ✓ |
+| Preview (5 rows) | — | — | ✓ |
+
+**Live result (first 5 rows):**
 ```json
 [
   {
@@ -286,8 +317,27 @@ SELECT status, COUNT(*) AS count FROM appointments WHERE strftime('%Y-%m', appoi
 ]
 ```
 
-**Attempt 3 – Row count:** 3
-**Attempt 3 – Preview (up to 5 rows):**
+**Reported result (from original run):**
+```json
+[
+  {
+    "total_appointments": 39
+  }
+]
+```
+
+#### Attempt 3
+
+```sql
+SELECT status, COUNT(*) AS count FROM appointments WHERE strftime('%Y-%m', appointment_date) = strftime('%Y-%m','now','-1 month') GROUP BY status;
+```
+
+| | Live | Reported | Match |
+|---|---|---|---|
+| Row count | 3 | 3 | ✓ |
+| Preview (5 rows) | — | — | ✓ |
+
+**Live result (first 5 rows):**
 ```json
 [
   {
@@ -305,7 +355,25 @@ SELECT status, COUNT(*) AS count FROM appointments WHERE strftime('%Y-%m', appoi
 ]
 ```
 
-**Final Answer from Agent:**
+**Reported result (from original run):**
+```json
+[
+  {
+    "status": "Cancelled",
+    "count": 13
+  },
+  {
+    "status": "Completed",
+    "count": 15
+  },
+  {
+    "status": "Scheduled",
+    "count": 11
+  }
+]
+```
+
+#### Final Answer from Agent
 
 **Appointments – March 2026 (the month preceding today)**  
 
@@ -344,11 +412,11 @@ If you’d like a visual chart of the status distribution or any additional deta
 
 ### Q4: Which doctor has the most appointments?
 
-**Expected Behaviour:** Aggregation + ordering
+**Expected behaviour:** Aggregation + ordering
+**Agent verdict:** Yes ✓  |  **Live SQL verdict:** ✓ MATCH
 
-**Correct:** Yes ✓
+#### SQL
 
-**SQL Executed by Agent:**
 ```sql
 SELECT d.name, COUNT(a.id) AS appointment_count
 FROM doctors d
@@ -358,8 +426,12 @@ ORDER BY appointment_count DESC, d.name
 LIMIT 1;
 ```
 
-**Result – Row count:** 1
-**Result – Preview (up to 5 rows):**
+| | Live | Reported | Match |
+|---|---|---|---|
+| Row count | 1 | 1 | ✓ |
+| Preview (5 rows) | — | — | ✓ |
+
+**Live result (first 5 rows):**
 ```json
 [
   {
@@ -369,7 +441,17 @@ LIMIT 1;
 ]
 ```
 
-**Final Answer from Agent:**
+**Reported result (from original run):**
+```json
+[
+  {
+    "name": "Januja Kala",
+    "appointment_count": 40
+  }
+]
+```
+
+#### Final Answer from Agent
 
 The doctor with the highest number of appointments is **Januja Kala**, who has **40 appointments**.
 
@@ -377,17 +459,21 @@ The doctor with the highest number of appointments is **Januja Kala**, who has
 
 ### Q5: What is the total revenue?
 
-**Expected Behaviour:** SUM of invoice amounts
+**Expected behaviour:** SUM of invoice amounts
+**Agent verdict:** Yes ✓  |  **Live SQL verdict:** ✓ MATCH
 
-**Correct:** Yes ✓
+#### SQL
 
-**SQL Executed by Agent:**
 ```sql
 SELECT ROUND(SUM(total_amount), 2) AS total_revenue FROM invoices
 ```
 
-**Result – Row count:** 1
-**Result – Preview (up to 5 rows):**
+| | Live | Reported | Match |
+|---|---|---|---|
+| Row count | 1 | 1 | ✓ |
+| Preview (5 rows) | — | — | ✓ |
+
+**Live result (first 5 rows):**
 ```json
 [
   {
@@ -396,7 +482,16 @@ SELECT ROUND(SUM(total_amount), 2) AS total_revenue FROM invoices
 ]
 ```
 
-**Final Answer from Agent:**
+**Reported result (from original run):**
+```json
+[
+  {
+    "total_revenue": 754921.83
+  }
+]
+```
+
+#### Final Answer from Agent
 
 The clinic’s total revenue recorded in the **invoices** table is ** 754,921.83 ** (rounded to two decimal places).
 
@@ -404,11 +499,11 @@ The clinic’s total revenue recorded in the **invoices** table is ** 754,921.
 
 ### Q6: Show revenue by doctor
 
-**Expected Behaviour:** JOIN + GROUP BY
+**Expected behaviour:** JOIN + GROUP BY
+**Agent verdict:** Yes ✓  |  **Live SQL verdict:** ✓ MATCH
 
-**Correct:** Yes ✓
+#### SQL
 
-**SQL Executed by Agent:**
 ```sql
 SELECT d.id AS doctor_id, d.name, d.specialization, SUM(t.cost) AS revenue
 FROM doctors d
@@ -418,8 +513,48 @@ GROUP BY d.id, d.name, d.specialization
 ORDER BY revenue DESC;
 ```
 
-**Result – Row count:** 15
-**Result – Preview (up to 5 rows):**
+| | Live | Reported | Match |
+|---|---|---|---|
+| Row count | 15 | 15 | ✓ |
+| Preview (5 rows) | — | — | ✓ |
+
+**Live result (first 5 rows):**
+```json
+[
+  {
+    "doctor_id": 15,
+    "name": "Lakshmi Deo",
+    "specialization": "General",
+    "revenue": 87183.19
+  },
+  {
+    "doctor_id": 9,
+    "name": "Yadavi Saha",
+    "specialization": "General",
+    "revenue": 82465.95
+  },
+  {
+    "doctor_id": 6,
+    "name": "Eta Pandit",
+    "specialization": "Cardiology",
+    "revenue": 81510.12
+  },
+  {
+    "doctor_id": 8,
+    "name": "Guneet Vora",
+    "specialization": "General",
+    "revenue": 80419.42
+  },
+  {
+    "doctor_id": 2,
+    "name": "Yochana Chawla",
+    "specialization": "Orthopedics",
+    "revenue": 73401.37
+  }
+]
+```
+
+**Reported result (from original run):**
 ```json
 [
   {
@@ -455,7 +590,7 @@ ORDER BY revenue DESC;
 ]
 ```
 
-**Final Answer from Agent:**
+#### Final Answer from Agent
 
 **Revenue by Doctor (based on summed treatment costs)**  
 
@@ -491,17 +626,21 @@ If you’d like deeper insight—e.g., revenue broken down by month, by treatmen
 
 ### Q7: How many cancelled appointments last quarter?
 
-**Expected Behaviour:** Status filter + date
+**Expected behaviour:** Status filter + date
+**Agent verdict:** Yes ✓  |  **Live SQL verdict:** ✓ MATCH
 
-**Correct:** Yes ✓
+#### SQL
 
-**SQL Executed by Agent:**
 ```sql
 SELECT COUNT(*) AS cancelled_count FROM appointments WHERE status='Cancelled' AND appointment_date >= '2026-01-01' AND appointment_date < '2026-04-01';
 ```
 
-**Result – Row count:** 1
-**Result – Preview (up to 5 rows):**
+| | Live | Reported | Match |
+|---|---|---|---|
+| Row count | 1 | 1 | ✓ |
+| Preview (5 rows) | — | — | ✓ |
+
+**Live result (first 5 rows):**
 ```json
 [
   {
@@ -510,7 +649,16 @@ SELECT COUNT(*) AS cancelled_count FROM appointments WHERE status='Cancelled' AN
 ]
 ```
 
-**Final Answer from Agent:**
+**Reported result (from original run):**
+```json
+[
+  {
+    "cancelled_count": 43
+  }
+]
+```
+
+#### Final Answer from Agent
 
 In the most recent quarter (January 1 – March 31 2026), the clinic recorded **43 appointments** with a status of **“Cancelled.”**
 
@@ -518,11 +666,11 @@ In the most recent quarter (January 1 – March 31 2026), the clinic r
 
 ### Q8: Top 5 patients by spending
 
-**Expected Behaviour:** JOIN + ORDER + LIMIT
+**Expected behaviour:** JOIN + ORDER + LIMIT
+**Agent verdict:** Yes ✓  |  **Live SQL verdict:** ✓ MATCH
 
-**Correct:** Yes ✓
+#### SQL
 
-**SQL Executed by Agent:**
 ```sql
 SELECT p.id, p.first_name, p.last_name, p.email, SUM(i.total_amount) AS total_spent
 FROM patients p
@@ -532,8 +680,53 @@ ORDER BY total_spent DESC
 LIMIT 5;
 ```
 
-**Result – Row count:** 5
-**Result – Preview (up to 5 rows):**
+| | Live | Reported | Match |
+|---|---|---|---|
+| Row count | 5 | 5 | ✓ |
+| Preview (5 rows) | — | — | ✓ |
+
+**Live result (first 5 rows):**
+```json
+[
+  {
+    "id": 42,
+    "first_name": "Ishanvi",
+    "last_name": "Ben",
+    "email": "indira66@example.com",
+    "total_spent": 17203.94
+  },
+  {
+    "id": 31,
+    "first_name": "Ekalinga",
+    "last_name": "Apte",
+    "email": "urishilla78@example.com",
+    "total_spent": 14943.970000000001
+  },
+  {
+    "id": 135,
+    "first_name": "Gaurika",
+    "last_name": "Rau",
+    "email": "warriorpavani@example.net",
+    "total_spent": 12731.09
+  },
+  {
+    "id": 149,
+    "first_name": "David",
+    "last_name": "Desai",
+    "email": "wrideshdash@example.com",
+    "total_spent": 12250.210000000001
+  },
+  {
+    "id": 159,
+    "first_name": "Charvi",
+    "last_name": "Walia",
+    "email": "idugar@example.net",
+    "total_spent": 12245.98
+  }
+]
+```
+
+**Reported result (from original run):**
 ```json
 [
   {
@@ -574,7 +767,7 @@ LIMIT 5;
 ]
 ```
 
-**Final Answer from Agent:**
+#### Final Answer from Agent
 
 **Top 5 Patients by Total Spending (Invoice Amounts)**  
 
@@ -598,17 +791,47 @@ If you need more detail—such as a breakdown by paid vs. pending amounts, spend
 
 ### Q9: Average treatment cost by specialization
 
-**Expected Behaviour:** Multi-table JOIN + AVG
+**Expected behaviour:** Multi-table JOIN + AVG
+**Agent verdict:** Yes ✓  |  **Live SQL verdict:** ✓ MATCH
 
-**Correct:** Yes ✓
+#### SQL
 
-**SQL Executed by Agent:**
 ```sql
 SELECT d.specialization, AVG(t.cost) AS average_cost FROM treatments t JOIN appointments a ON t.appointment_id = a.id JOIN doctors d ON a.doctor_id = d.id GROUP BY d.specialization
 ```
 
-**Result – Row count:** 5
-**Result – Preview (up to 5 rows):**
+| | Live | Reported | Match |
+|---|---|---|---|
+| Row count | 5 | 5 | ✓ |
+| Preview (5 rows) | — | — | ✓ |
+
+**Live result (first 5 rows):**
+```json
+[
+  {
+    "specialization": "Cardiology",
+    "average_cost": 2439.362452830189
+  },
+  {
+    "specialization": "Dermatology",
+    "average_cost": 2649.7805
+  },
+  {
+    "specialization": "General",
+    "average_cost": 2660.303829787234
+  },
+  {
+    "specialization": "Orthopedics",
+    "average_cost": 2411.3407692307696
+  },
+  {
+    "specialization": "Pediatrics",
+    "average_cost": 2320.069882352941
+  }
+]
+```
+
+**Reported result (from original run):**
 ```json
 [
   {
@@ -634,7 +857,7 @@ SELECT d.specialization, AVG(t.cost) AS average_cost FROM treatments t JOIN appo
 ]
 ```
 
-**Final Answer from Agent:**
+#### Final Answer from Agent
 
 **Average Treatment Cost by Doctor Specialization**
 
@@ -659,11 +882,11 @@ If you’d like to see the raw data, compare these averages to the total number 
 
 ### Q10: Show monthly appointment count for the past 6 months
 
-**Expected Behaviour:** Date grouping
+**Expected behaviour:** Date grouping
+**Agent verdict:** Yes ✓  |  **Live SQL verdict:** ✓ MATCH
 
-**Correct:** Yes ✓
+#### SQL
 
-**SQL Executed by Agent:**
 ```sql
 SELECT strftime('%Y-%m', appointment_date) AS month, COUNT(*) AS appointment_count
 FROM appointments
@@ -672,8 +895,12 @@ GROUP BY month
 ORDER BY month;
 ```
 
-**Result – Row count:** 6
-**Result – Preview (up to 5 rows):**
+| | Live | Reported | Match |
+|---|---|---|---|
+| Row count | 6 | 6 | ✓ |
+| Preview (5 rows) | — | — | ✓ |
+
+**Live result (first 5 rows):**
 ```json
 [
   {
@@ -699,7 +926,33 @@ ORDER BY month;
 ]
 ```
 
-**Final Answer from Agent:**
+**Reported result (from original run):**
+```json
+[
+  {
+    "month": "2025-11",
+    "appointment_count": 45
+  },
+  {
+    "month": "2025-12",
+    "appointment_count": 43
+  },
+  {
+    "month": "2026-01",
+    "appointment_count": 42
+  },
+  {
+    "month": "2026-02",
+    "appointment_count": 51
+  },
+  {
+    "month": "2026-03",
+    "appointment_count": 39
+  }
+]
+```
+
+#### Final Answer from Agent
 
 **Monthly Appointment Count – Last 6 Months**
 
@@ -739,11 +992,11 @@ Feel free to ask for a deeper drill‑down (e.g., by doctor, department, or appo
 
 ### Q11: Which city has the most patients?
 
-**Expected Behaviour:** GROUP BY + COUNT
+**Expected behaviour:** GROUP BY + COUNT
+**Agent verdict:** Yes ✓  |  **Live SQL verdict:** ✓ MATCH
 
-**Correct:** Yes ✓
+#### SQL
 
-**SQL Executed by Agent:**
 ```sql
 SELECT city, COUNT(*) AS patient_count
             FROM patients
@@ -752,8 +1005,12 @@ SELECT city, COUNT(*) AS patient_count
             LIMIT 1
 ```
 
-**Result – Row count:** 1
-**Result – Preview (up to 5 rows):**
+| | Live | Reported | Match |
+|---|---|---|---|
+| Row count | 1 | 1 | ✓ |
+| Preview (5 rows) | — | — | ✓ |
+
+**Live result (first 5 rows):**
 ```json
 [
   {
@@ -763,7 +1020,17 @@ SELECT city, COUNT(*) AS patient_count
 ]
 ```
 
-**Final Answer from Agent:**
+**Reported result (from original run):**
+```json
+[
+  {
+    "city": "Kochi",
+    "patient_count": 27
+  }
+]
+```
+
+#### Final Answer from Agent
 
 The city with the highest number of patients is **Kochi**, with **27 patients** recorded in the database.
 
@@ -771,11 +1038,11 @@ The city with the highest number of patients is **Kochi**, with **27 patients** 
 
 ### Q12: List patients who visited more than 3 times
 
-**Expected Behaviour:** HAVING clause
+**Expected behaviour:** HAVING clause
+**Agent verdict:** Yes ✓  |  **Live SQL verdict:** ✓ MATCH
 
-**Correct:** Yes ✓
+#### SQL
 
-**SQL Executed by Agent:**
 ```sql
 SELECT p.id, p.first_name, p.last_name, p.email, p.phone, COUNT(a.id) AS visit_count
 FROM patients p
@@ -786,8 +1053,12 @@ HAVING COUNT(a.id) > 3
 ORDER BY visit_count DESC;
 ```
 
-**Result – Row count:** 3
-**Result – Preview (up to 5 rows):**
+| | Live | Reported | Match |
+|---|---|---|---|
+| Row count | 3 | 3 | ✓ |
+| Preview (5 rows) | — | — | ✓ |
+
+**Live result (first 5 rows):**
 ```json
 [
   {
@@ -817,7 +1088,37 @@ ORDER BY visit_count DESC;
 ]
 ```
 
-**Final Answer from Agent:**
+**Reported result (from original run):**
+```json
+[
+  {
+    "id": 10,
+    "first_name": "Orinder",
+    "last_name": "Ratta",
+    "email": "champak18@example.org",
+    "phone": "+91 9069812532",
+    "visit_count": 4
+  },
+  {
+    "id": 83,
+    "first_name": "Jeet",
+    "last_name": "Hegde",
+    "email": "sibalwakeeta@example.net",
+    "phone": "+91 6083011231",
+    "visit_count": 4
+  },
+  {
+    "id": 125,
+    "first_name": "Samesh",
+    "last_name": "Pathak",
+    "email": null,
+    "phone": "+91 6366809563",
+    "visit_count": 4
+  }
+]
+```
+
+#### Final Answer from Agent
 
 Here are the patients who have had **more than three completed appointments** (i.e., they have visited the clinic at least four times):
 
@@ -839,24 +1140,24 @@ If you need additional details (e.g., the dates of those visits, the doctors the
 
 ### Q13: Show unpaid invoices
 
-**Expected Behaviour:** Status filter
+**Expected behaviour:** Status filter
+**Agent verdict:** Yes ✓  |  **Live SQL verdict:** ✓ MATCH
 
-**Correct:** Yes ✓
+#### Attempt 1
 
-**SQL Executed by Agent:**
 ```sql
 SELECT id, patient_id, invoice_date, total_amount, paid_amount, status
             FROM invoices
             WHERE paid_amount < total_amount OR status != 'Paid'
             ORDER BY invoice_date DESC, id DESC
-
-SELECT COUNT(*) AS invoice_count, SUM(total_amount) AS total_due FROM invoices WHERE paid_amount < total_amount OR status != 'Paid'
-
-SELECT status, COUNT(*) AS cnt, SUM(total_amount) AS sum_total FROM invoices WHERE paid_amount < total_amount OR status != 'Paid' GROUP BY status
 ```
 
-**Attempt 1 – Row count:** 244
-**Attempt 1 – Preview (up to 5 rows):**
+| | Live | Reported | Match |
+|---|---|---|---|
+| Row count | 244 | 244 | ✓ |
+| Preview (5 rows) | — | — | ✓ |
+
+**Live result (first 5 rows):**
 ```json
 [
   {
@@ -902,8 +1203,74 @@ SELECT status, COUNT(*) AS cnt, SUM(total_amount) AS sum_total FROM invoices WHE
 ]
 ```
 
-**Attempt 2 – Row count:** 1
-**Attempt 2 – Preview (up to 5 rows):**
+**Reported result (from original run):**
+```json
+[
+  {
+    "id": 72,
+    "patient_id": 148,
+    "invoice_date": "2026-04-14",
+    "total_amount": 174.29,
+    "paid_amount": 174.29,
+    "status": "Pending"
+  },
+  {
+    "id": 180,
+    "patient_id": 74,
+    "invoice_date": "2026-04-11",
+    "total_amount": 4510.62,
+    "paid_amount": 2518.11,
+    "status": "Overdue"
+  },
+  {
+    "id": 12,
+    "patient_id": 98,
+    "invoice_date": "2026-04-11",
+    "total_amount": 2018.63,
+    "paid_amount": 398.28,
+    "status": "Pending"
+  },
+  {
+    "id": 159,
+    "patient_id": 22,
+    "invoice_date": "2026-04-09",
+    "total_amount": 715.6,
+    "paid_amount": 715.6,
+    "status": "Pending"
+  },
+  {
+    "id": 235,
+    "patient_id": 148,
+    "invoice_date": "2026-04-08",
+    "total_amount": 2787.75,
+    "paid_amount": 2787.75,
+    "status": "Pending"
+  }
+]
+```
+
+#### Attempt 2
+
+```sql
+SELECT COUNT(*) AS invoice_count, SUM(total_amount) AS total_due FROM invoices WHERE paid_amount < total_amount OR status != 'Paid'
+```
+
+| | Live | Reported | Match |
+|---|---|---|---|
+| Row count | 1 | 1 | ✓ |
+| Preview (5 rows) | — | — | ✓ |
+
+**Live result (first 5 rows):**
+```json
+[
+  {
+    "invoice_count": 244,
+    "total_due": 591951.5
+  }
+]
+```
+
+**Reported result (from original run):**
 ```json
 [
   {
@@ -913,8 +1280,39 @@ SELECT status, COUNT(*) AS cnt, SUM(total_amount) AS sum_total FROM invoices WHE
 ]
 ```
 
-**Attempt 3 – Row count:** 3
-**Attempt 3 – Preview (up to 5 rows):**
+#### Attempt 3
+
+```sql
+SELECT status, COUNT(*) AS cnt, SUM(total_amount) AS sum_total FROM invoices WHERE paid_amount < total_amount OR status != 'Paid' GROUP BY status
+```
+
+| | Live | Reported | Match |
+|---|---|---|---|
+| Row count | 3 | 3 | ✓ |
+| Preview (5 rows) | — | — | ✓ |
+
+**Live result (first 5 rows):**
+```json
+[
+  {
+    "status": "Overdue",
+    "cnt": 85,
+    "sum_total": 217277.71
+  },
+  {
+    "status": "Paid",
+    "cnt": 47,
+    "sum_total": 109672.1
+  },
+  {
+    "status": "Pending",
+    "cnt": 112,
+    "sum_total": 265001.69
+  }
+]
+```
+
+**Reported result (from original run):**
 ```json
 [
   {
@@ -935,7 +1333,7 @@ SELECT status, COUNT(*) AS cnt, SUM(total_amount) AS sum_total FROM invoices WHE
 ]
 ```
 
-**Final Answer from Agent:**
+#### Final Answer from Agent
 
 **Unpaid invoices (paid < total OR status ≠ ‘Paid’)**
 
@@ -957,39 +1355,23 @@ SELECT status, COUNT(*) AS cnt, SUM(total_amount) AS sum_total FROM invoices WHE
 
 ---
 
-### Summary of all unpaid invoices
-
-| Status   | # Invoices | Total amount (¥) |
-|----------|-----------|-----------------|
-| **Overdue** | 85 | 217 277.71 |
-| **Pending** | 112 | 265 001.69 |
-| **Paid** (partial) | 47 | 109 672.10 |
-| **Overall** | **244** | **591 951.50** |
-
-*There are **244** invoices that are not fully settled, representing a total outstanding balance of **≈ ¥ 592 k**.*
-
----
-
-#### What you can do next
-- **Filter by date or patient** to focus on a specific period or individual.
-- **Export the full list** (the query returned all rows) for further processing in your billing system.
-- **Visualise** the breakdown (e.g., pie chart of status distribution or bar chart of overdue vs. pending amounts) if you need a quick visual overview.
-
----
-
 ### Q14: What percentage of appointments are no-shows?
 
-**Expected Behaviour:** Percentage calculation
+**Expected behaviour:** Percentage calculation
+**Agent verdict:** Yes ✓  |  **Live SQL verdict:** ✓ MATCH
 
-**Correct:** Yes ✓
+#### SQL
 
-**SQL Executed by Agent:**
 ```sql
 SELECT ROUND(100.0 * SUM(CASE WHEN status = 'No-show' THEN 1 ELSE 0 END) / COUNT(*), 2) AS no_show_percentage FROM appointments;
 ```
 
-**Result – Row count:** 1
-**Result – Preview (up to 5 rows):**
+| | Live | Reported | Match |
+|---|---|---|---|
+| Row count | 1 | 1 | ✓ |
+| Preview (5 rows) | — | — | ✓ |
+
+**Live result (first 5 rows):**
 ```json
 [
   {
@@ -998,7 +1380,16 @@ SELECT ROUND(100.0 * SUM(CASE WHEN status = 'No-show' THEN 1 ELSE 0 END) / COUNT
 ]
 ```
 
-**Final Answer from Agent:**
+**Reported result (from original run):**
+```json
+[
+  {
+    "no_show_percentage": 0.0
+  }
+]
+```
+
+#### Final Answer from Agent
 
 The query shows that **0 % of all appointments are recorded as “No‑show.”** This indicates that, so far, none of the scheduled appointments in the system have been marked with a no‑show status. If you’d like to explore this further (e.g., by date range, department, or doctor), just let me know!
 
@@ -1006,11 +1397,11 @@ The query shows that **0 % of all appointments are recorded as “No‑show.�
 
 ### Q15: Show the busiest day of the week for appointments
 
-**Expected Behaviour:** Date function
+**Expected behaviour:** Date function
+**Agent verdict:** Yes ✓  |  **Live SQL verdict:** ✓ MATCH
 
-**Correct:** Yes ✓
+#### SQL
 
-**SQL Executed by Agent:**
 ```sql
 SELECT CASE strftime('%w', appointment_date)
     WHEN '0' THEN 'Sunday'
@@ -1028,8 +1419,12 @@ ORDER BY appointment_count DESC
 LIMIT 1;
 ```
 
-**Result – Row count:** 1
-**Result – Preview (up to 5 rows):**
+| | Live | Reported | Match |
+|---|---|---|---|
+| Row count | 1 | 1 | ✓ |
+| Preview (5 rows) | — | — | ✓ |
+
+**Live result (first 5 rows):**
 ```json
 [
   {
@@ -1039,7 +1434,17 @@ LIMIT 1;
 ]
 ```
 
-**Final Answer from Agent:**
+**Reported result (from original run):**
+```json
+[
+  {
+    "day_of_week": "Tuesday",
+    "appointment_count": 87
+  }
+]
+```
+
+#### Final Answer from Agent
 
 The analysis of the **appointments** table shows which weekday has the highest number of scheduled appointments.
 
@@ -1060,11 +1465,11 @@ If you need further breakdowns—such as by department, doctor, or trends over t
 
 ### Q16: Revenue trend by month
 
-**Expected Behaviour:** Time series
+**Expected behaviour:** Time series
+**Agent verdict:** Yes ✓  |  **Live SQL verdict:** ✓ MATCH
 
-**Correct:** Yes ✓
+#### SQL
 
-**SQL Executed by Agent:**
 ```sql
 SELECT strftime('%Y-%m', invoice_date) AS month,
        ROUND(SUM(total_amount), 2) AS monthly_revenue
@@ -1073,8 +1478,12 @@ GROUP BY strftime('%Y-%m', invoice_date)
 ORDER BY month;
 ```
 
-**Result – Row count:** 13
-**Result – Preview (up to 5 rows):**
+| | Live | Reported | Match |
+|---|---|---|---|
+| Row count | 13 | 13 | ✓ |
+| Preview (5 rows) | — | — | ✓ |
+
+**Live result (first 5 rows):**
 ```json
 [
   {
@@ -1100,7 +1509,33 @@ ORDER BY month;
 ]
 ```
 
-**Final Answer from Agent:**
+**Reported result (from original run):**
+```json
+[
+  {
+    "month": "2025-04",
+    "monthly_revenue": 46338.65
+  },
+  {
+    "month": "2025-05",
+    "monthly_revenue": 45180.79
+  },
+  {
+    "month": "2025-06",
+    "monthly_revenue": 74468.71
+  },
+  {
+    "month": "2025-07",
+    "monthly_revenue": 64466.02
+  },
+  {
+    "month": "2025-08",
+    "monthly_revenue": 58393.19
+  }
+]
+```
+
+#### Final Answer from Agent
 
 **Monthly Revenue from Invoices (by invoice_date)**  
 
@@ -1150,11 +1585,11 @@ If you’d like any of these deeper analyses—by doctor, department, or payment
 
 ### Q17: Average appointment duration by doctor
 
-**Expected Behaviour:** AVG + GROUP BY
+**Expected behaviour:** AVG + GROUP BY
+**Agent verdict:** No ✗  |  **Live SQL verdict:** ⚠ PARTIAL / ERROR
 
-**Correct:** No ✗
+#### Attempt 1
 
-**SQL Executed by Agent:**
 ```sql
 SELECT d.name AS doctor_name,
        AVG(appointment_duration) AS avg_duration_minutes
@@ -1167,26 +1602,14 @@ FROM (
 JOIN doctors d ON appt.doctor_id = d.id
 GROUP BY d.id, d.name
 ORDER BY d.name;
-
-SELECT MIN(avg_duration) AS min_avg, MAX(avg_duration) AS max_avg, AVG(avg_duration) AS overall_avg FROM (SELECT d.id, AVG(COALESCE(SUM(t.duration_minutes),0)) AS avg_duration FROM appointments a LEFT JOIN treatments t ON t.appointment_id = a.id JOIN doctors d ON a.doctor_id = d.id GROUP BY a.id, d.id)
-
-SELECT d.name AS doctor_name,
-       COUNT(a.id) AS appointment_count,
-       AVG(COALESCE(t_sum.duration_minutes,0)) AS avg_duration_minutes
-FROM doctors d
-LEFT JOIN appointments a ON a.doctor_id = d.id
-LEFT JOIN (
-    SELECT a.id, SUM(t.duration_minutes) AS duration_minutes
-    FROM appointments a
-    LEFT JOIN treatments t ON t.appointment_id = a.id
-    GROUP BY a.id
-) t_sum ON t_sum.id = a.id
-GROUP BY d.id, d.name
-ORDER BY d.name;
 ```
 
-**Attempt 1 – Row count:** 15
-**Attempt 1 – Preview (up to 5 rows):**
+| | Live | Reported | Match |
+|---|---|---|---|
+| Row count | 15 | 15 | ✓ |
+| Preview (5 rows) | — | — | ✓ |
+
+**Live result (first 5 rows):**
 ```json
 [
   {
@@ -1212,10 +1635,71 @@ ORDER BY d.name;
 ]
 ```
 
-**Attempt 2 – Error:** Database execution failed: misuse of aggregate function SUM()
+**Reported result (from original run):**
+```json
+[
+  {
+    "doctor_name": "Aadhya Ravi",
+    "avg_duration_minutes": 64.18518518518519
+  },
+  {
+    "doctor_name": "Chakradhar Chakraborty",
+    "avg_duration_minutes": 28.655172413793103
+  },
+  {
+    "doctor_name": "Elijah Sarraf",
+    "avg_duration_minutes": 50.794871794871796
+  },
+  {
+    "doctor_name": "Eta Pandit",
+    "avg_duration_minutes": 96.92105263157895
+  },
+  {
+    "doctor_name": "Girindra Karan",
+    "avg_duration_minutes": 97.0909090909091
+  }
+]
+```
 
-**Attempt 3 – Row count:** 15
-**Attempt 3 – Preview (up to 5 rows):**
+#### Attempt 2
+
+```sql
+SELECT MIN(avg_duration) AS min_avg, MAX(avg_duration) AS max_avg, AVG(avg_duration) AS overall_avg FROM (SELECT d.id, AVG(COALESCE(SUM(t.duration_minutes),0)) AS avg_duration FROM appointments a LEFT JOIN treatments t ON t.appointment_id = a.id JOIN doctors d ON a.doctor_id = d.id GROUP BY a.id, d.id)
+```
+
+| | Live | Reported |
+|---|---|---|
+| Row count | — | — |
+| Status | **ERROR** | ERROR |
+
+> **Live error:** `misuse of aggregate function SUM()`
+
+> **Reported error:** `Database execution failed: misuse of aggregate function SUM()`
+
+#### Attempt 3
+
+```sql
+SELECT d.name AS doctor_name,
+       COUNT(a.id) AS appointment_count,
+       AVG(COALESCE(t_sum.duration_minutes,0)) AS avg_duration_minutes
+FROM doctors d
+LEFT JOIN appointments a ON a.doctor_id = d.id
+LEFT JOIN (
+    SELECT a.id, SUM(t.duration_minutes) AS duration_minutes
+    FROM appointments a
+    LEFT JOIN treatments t ON t.appointment_id = a.id
+    GROUP BY a.id
+) t_sum ON t_sum.id = a.id
+GROUP BY d.id, d.name
+ORDER BY d.name;
+```
+
+| | Live | Reported | Match |
+|---|---|---|---|
+| Row count | 15 | 15 | ✓ |
+| Preview (5 rows) | — | — | ✓ |
+
+**Live result (first 5 rows):**
 ```json
 [
   {
@@ -1246,7 +1730,38 @@ ORDER BY d.name;
 ]
 ```
 
-**Final Answer from Agent:**
+**Reported result (from original run):**
+```json
+[
+  {
+    "doctor_name": "Aadhya Ravi",
+    "appointment_count": 27,
+    "avg_duration_minutes": 64.18518518518519
+  },
+  {
+    "doctor_name": "Chakradhar Chakraborty",
+    "appointment_count": 29,
+    "avg_duration_minutes": 28.655172413793103
+  },
+  {
+    "doctor_name": "Elijah Sarraf",
+    "appointment_count": 39,
+    "avg_duration_minutes": 50.794871794871796
+  },
+  {
+    "doctor_name": "Eta Pandit",
+    "appointment_count": 38,
+    "avg_duration_minutes": 96.92105263157895
+  },
+  {
+    "doctor_name": "Girindra Karan",
+    "appointment_count": 33,
+    "avg_duration_minutes": 97.0909090909091
+  }
+]
+```
+
+#### Final Answer from Agent
 
 **Average Appointment Duration by Doctor (minutes)**  
 
@@ -1289,25 +1804,24 @@ Agent reached a final answer after one or more failed SQL attempts.
 
 ### Q18: List patients with overdue invoices
 
-**Expected Behaviour:** JOIN + filter
+**Expected behaviour:** JOIN + filter
+**Agent verdict:** Yes ✓  |  **Live SQL verdict:** ✓ MATCH
 
-**Correct:** Yes ✓
+#### Attempt 1
 
-**SQL Executed by Agent:**
 ```sql
 SELECT p.id AS patient_id, p.first_name, p.last_name, p.email, p.phone, i.id AS invoice_id, i.invoice_date, i.total_amount, i.paid_amount, i.status
 FROM patients p
 JOIN invoices i ON p.id = i.patient_id
 WHERE i.status = 'Overdue'
-
-SELECT COUNT(DISTINCT p.id) AS patient_count, SUM(i.total_amount) AS total_overdue_amount
-FROM patients p
-JOIN invoices i ON p.id = i.patient_id
-WHERE i.status = 'Overdue'
 ```
 
-**Attempt 1 – Row count:** 85
-**Attempt 1 – Preview (up to 5 rows):**
+| | Live | Reported | Match |
+|---|---|---|---|
+| Row count | 85 | 85 | ✓ |
+| Preview (5 rows) | — | — | ✓ |
+
+**Live result (first 5 rows):**
 ```json
 [
   {
@@ -1373,8 +1887,97 @@ WHERE i.status = 'Overdue'
 ]
 ```
 
-**Attempt 2 – Row count:** 1
-**Attempt 2 – Preview (up to 5 rows):**
+**Reported result (from original run):**
+```json
+[
+  {
+    "patient_id": 112,
+    "first_name": "Baljiwan",
+    "last_name": "Chaudhry",
+    "email": "tanmayichauhan@example.net",
+    "phone": "+91 6894244916",
+    "invoice_id": 4,
+    "invoice_date": "2025-06-01",
+    "total_amount": 2963.18,
+    "paid_amount": 1088.56,
+    "status": "Overdue"
+  },
+  {
+    "patient_id": 190,
+    "first_name": "Niharika",
+    "last_name": "Deshmukh",
+    "email": "aryanben@example.net",
+    "phone": null,
+    "invoice_id": 10,
+    "invoice_date": "2025-06-21",
+    "total_amount": 3194.23,
+    "paid_amount": 3194.23,
+    "status": "Overdue"
+  },
+  {
+    "patient_id": 44,
+    "first_name": "Wyatt",
+    "last_name": "Jayaraman",
+    "email": "kondaavni@example.com",
+    "phone": "+91 9218423951",
+    "invoice_id": 11,
+    "invoice_date": "2026-02-15",
+    "total_amount": 1739.78,
+    "paid_amount": 335.95,
+    "status": "Overdue"
+  },
+  {
+    "patient_id": 189,
+    "first_name": "Krishna",
+    "last_name": "Sachdeva",
+    "email": "routharshil@example.net",
+    "phone": "+91 6869756607",
+    "invoice_id": 15,
+    "invoice_date": "2025-05-28",
+    "total_amount": 1734.98,
+    "paid_amount": 342.35,
+    "status": "Overdue"
+  },
+  {
+    "patient_id": 164,
+    "first_name": "Zehaan",
+    "last_name": "Goyal",
+    "email": "kamalakrishnan@example.com",
+    "phone": null,
+    "invoice_id": 24,
+    "invoice_date": "2025-07-28",
+    "total_amount": 1897.16,
+    "paid_amount": 1897.16,
+    "status": "Overdue"
+  }
+]
+```
+
+#### Attempt 2
+
+```sql
+SELECT COUNT(DISTINCT p.id) AS patient_count, SUM(i.total_amount) AS total_overdue_amount
+FROM patients p
+JOIN invoices i ON p.id = i.patient_id
+WHERE i.status = 'Overdue'
+```
+
+| | Live | Reported | Match |
+|---|---|---|---|
+| Row count | 1 | 1 | ✓ |
+| Preview (5 rows) | — | — | ✓ |
+
+**Live result (first 5 rows):**
+```json
+[
+  {
+    "patient_count": 69,
+    "total_overdue_amount": 217277.71
+  }
+]
+```
+
+**Reported result (from original run):**
 ```json
 [
   {
@@ -1384,7 +1987,7 @@ WHERE i.status = 'Overdue'
 ]
 ```
 
-**Final Answer from Agent:**
+#### Final Answer from Agent
 
 **Patients with overdue invoices**
 
@@ -1410,11 +2013,11 @@ These patients have invoices marked with the status **“Overdue.”** You can u
 
 ### Q19: Compare revenue between departments
 
-**Expected Behaviour:** JOIN + GROUP BY
+**Expected behaviour:** JOIN + GROUP BY
+**Agent verdict:** Yes ✓  |  **Live SQL verdict:** ✓ MATCH
 
-**Correct:** Yes ✓
+#### SQL
 
-**SQL Executed by Agent:**
 ```sql
 SELECT d.department, SUM(t.cost) AS revenue
 FROM treatments t
@@ -1424,8 +2027,38 @@ GROUP BY d.department
 ORDER BY revenue DESC;
 ```
 
-**Result – Row count:** 5
-**Result – Preview (up to 5 rows):**
+| | Live | Reported | Match |
+|---|---|---|---|
+| Row count | 5 | 5 | ✓ |
+| Preview (5 rows) | — | — | ✓ |
+
+**Live result (first 5 rows):**
+```json
+[
+  {
+    "department": "OPD",
+    "revenue": 250068.56
+  },
+  {
+    "department": "Department of Pediatrics",
+    "revenue": 197205.94
+  },
+  {
+    "department": "Department of Orthopedics",
+    "revenue": 188084.58000000002
+  },
+  {
+    "department": "Department of Cardiology",
+    "revenue": 129286.21
+  },
+  {
+    "department": "Department of Dermatology",
+    "revenue": 105991.22
+  }
+]
+```
+
+**Reported result (from original run):**
 ```json
 [
   {
@@ -1451,7 +2084,7 @@ ORDER BY revenue DESC;
 ]
 ```
 
-**Final Answer from Agent:**
+#### Final Answer from Agent
 
 **Revenue by Department**
 
@@ -1481,17 +2114,21 @@ If you need deeper analysis—such as revenue trends over time, profit margins, 
 
 ### Q20: Show patient registration trend by month
 
-**Expected Behaviour:** Date grouping
+**Expected behaviour:** Date grouping
+**Agent verdict:** Yes ✓  |  **Live SQL verdict:** ✓ MATCH
 
-**Correct:** Yes ✓
+#### SQL
 
-**SQL Executed by Agent:**
 ```sql
 SELECT strftime('%Y-%m', registered_date) AS month, COUNT(*) AS registrations FROM patients GROUP BY month ORDER BY month;
 ```
 
-**Result – Row count:** 13
-**Result – Preview (up to 5 rows):**
+| | Live | Reported | Match |
+|---|---|---|---|
+| Row count | 13 | 13 | ✓ |
+| Preview (5 rows) | — | — | ✓ |
+
+**Live result (first 5 rows):**
 ```json
 [
   {
@@ -1517,7 +2154,33 @@ SELECT strftime('%Y-%m', registered_date) AS month, COUNT(*) AS registrations FR
 ]
 ```
 
-**Final Answer from Agent:**
+**Reported result (from original run):**
+```json
+[
+  {
+    "month": "2025-04",
+    "registrations": 9
+  },
+  {
+    "month": "2025-05",
+    "registrations": 16
+  },
+  {
+    "month": "2025-06",
+    "registrations": 18
+  },
+  {
+    "month": "2025-07",
+    "registrations": 21
+  },
+  {
+    "month": "2025-08",
+    "registrations": 15
+  }
+]
+```
+
+#### Final Answer from Agent
 
 **Patient Registration Trend (by month)**  
 
